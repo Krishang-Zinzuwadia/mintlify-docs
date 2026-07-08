@@ -18,11 +18,12 @@ a.select-none {
   display: none !important;
 }
 
-/* Hide horizontal scrollbars on code blocks */
+/* Hide horizontal scrollbar visually but keep scroll functionality */
 pre {
-  overflow-x: hidden !important;
+  overflow-x: auto !important;
+  scrollbar-width: none !important;
+  -ms-overflow-style: none !important;
 }
-pre code {
-  white-space: pre-wrap !important;
-  word-break: break-all !important;
+pre::-webkit-scrollbar {
+  display: none !important;
 }
