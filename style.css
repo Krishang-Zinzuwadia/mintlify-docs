@@ -5,3 +5,10 @@
 .dark #sidebar {
   border-right: 1px solid rgba(255, 255, 255, 0.15) !important;
 }
+
+a.select-none img, img[src*="fw.ico"] {
+  height: 28px !important;
+  width: auto !important;
+  max-height: none !important;
+  border-radius: 4px;
+}

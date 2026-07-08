@@ -7,7 +7,7 @@
     "light": "#60A5FA",
     "dark": "#2563EB"
   },
-  "favicon": "/images/favicon.svg",
+  "favicon": "/images/fw.ico",
   "navigation": {
     "groups": [
       {
@@ -44,8 +44,8 @@
     ]
   },
   "logo": {
-    "light": "/images/logo.svg",
-    "dark": "/images/logo.svg"
+    "light": "/images/fw.ico",
+    "dark": "/images/fw.ico"
   },
   "background": {
     "color": {
