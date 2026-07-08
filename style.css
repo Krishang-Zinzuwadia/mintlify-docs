@@ -27,3 +27,9 @@ pre {
 pre::-webkit-scrollbar {
   display: none !important;
 }
+
+/* Hide theme preference trigger button completely */
+#theme-preference-menu-trigger {
+  display: none !important;
+}
+

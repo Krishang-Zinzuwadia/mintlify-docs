@@ -39,10 +39,15 @@
         "pages": [
           "content/06-cloud-ssrf-imds-s3"
         ]
+      },
+      {
+        "group": "AUTHOR",
+        "pages": [
+          "content/krishang"
+        ]
       }
     ]
   },
-
   "background": {
     "color": {
       "dark": "#0B1120"
@@ -51,12 +56,5 @@
   "modeToggle": {
     "default": "dark",
     "isHidden": true
-  },
-  "navbar": {
-    "primary": {
-      "type": "button",
-      "label": "View Challenges",
-      "href": "/"
-    }
   }
 }
