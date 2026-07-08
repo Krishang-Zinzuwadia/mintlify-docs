@@ -12,3 +12,8 @@ a.select-none img, img[src*="fw.ico"] {
   max-height: none !important;
   border-radius: 4px;
 }
+
+/* Hide the logo and branding completely from the top left */
+a.select-none {
+  display: none !important;
+}
