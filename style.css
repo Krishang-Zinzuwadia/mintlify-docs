@@ -17,3 +17,12 @@ a.select-none img, img[src*="fw.ico"] {
 a.select-none {
   display: none !important;
 }
+
+/* Hide scrollbars on code blocks */
+pre {
+  scrollbar-width: none !important; /* Firefox */
+  -ms-overflow-style: none !important; /* IE/Edge */
+}
+pre::-webkit-scrollbar {
+  display: none !important; /* Chrome/Safari */
+}
