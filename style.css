@@ -18,11 +18,11 @@ a.select-none {
   display: none !important;
 }
 
-/* Hide scrollbars on code blocks */
+/* Hide horizontal scrollbars on code blocks */
 pre {
-  scrollbar-width: none !important; /* Firefox */
-  -ms-overflow-style: none !important; /* IE/Edge */
+  overflow-x: hidden !important;
 }
-pre::-webkit-scrollbar {
-  display: none !important; /* Chrome/Safari */
+pre code {
+  white-space: pre-wrap !important;
+  word-break: break-all !important;
 }
