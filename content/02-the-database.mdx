@@ -15,7 +15,7 @@ FAM{4n0n_4uth_1s_n0t_s3cur3_en0ugh}
 ## Challenge Summary
 ---
 
-The challenge was an Android APK named `fam-ctf (1).apk`.
+The challenge was an Android APK named `fam-ctf.apk`.
 
 Prompt:
 
@@ -29,7 +29,6 @@ The hint points at anonymous identity rather than no identity. In Firebase terms
 
 ## Recon
 ---
-
 
 I listed APK contents:
 
@@ -58,7 +57,7 @@ Why: Firebase libraries and a native `libfam.so` suggested a mobile app using Fi
 ## Searching For Firebase Configuration
 ---
 
-I searched strings in APK members for Firebase URLs, API keys, and flag-like content:
+I searched strings in APK members for Firebase URLs, API keys, and project identifiers:
 
 ```powershell Terminal
 python -c "import zipfile,re; z=zipfile.ZipFile('fam-ctf (1).apk'); pats=[b'AIza',b'google_app_id',b'firebase_database_url',b'fam-ctf',b'default-rtdb',b'gcm_defaultSenderId',b'project_id'];\
@@ -80,32 +79,12 @@ fam-ctf
 fam-ctf.firebasestorage.app
 ```
 
-Why: Firebase client apps normally embed the API key and project config. The API key is not a secret by itself, but it enables client-side Firebase auth flows such as anonymous sign-in.
-
-## False Lead: Native Flag-Like String
----
-
-A broad string search found this in `libfam.so`:
-
-```text Output
-FAM{str1ngs_d0nt_l13_1n_n4t1v3_l4nd}
-```
-
-Command pattern:
-
-```powershell Terminal
-python -c "import zipfile,re; z=zipfile.ZipFile('fam-ctf (1).apk');\
-for n in ['lib/x86_64/libfam.so','lib/arm64-v8a/libfam.so']:\
- b=z.read(n); print('---',n);\
- for m in re.finditer(rb'[ -~]{4,}', b):\
-  s=m.group().decode('latin1','ignore');\
-  if any(x in s.lower() for x in ['fam{','secret','token','debug','user','signature','firebase','database','flag']): print(s)"
-```
-
-Why it was not accepted as the database flag: the prompt was specifically about a room with a lock and optional identity. That matched Firebase anonymous auth and Realtime Database rules better than a native string extraction challenge.
+Why: Firebase client apps normally embed the API key and project configuration. The API key is not a secret by itself, but it enables client-side Firebase authentication flows such as anonymous sign-in.
 
 ## Confirming Plain Database Access Was Blocked
 ---
+
+Since the APK clearly contained Firebase configuration, the next step was to check whether the Realtime Database allowed unauthenticated access.
 
 I tried reading the Realtime Database root without auth:
 
@@ -138,7 +117,7 @@ $r=Invoke-RestMethod -Method Post `
 $r | ConvertTo-Json -Depth 5
 ```
 
-Why: Firebase anonymous auth returns an `idToken` with `sign_in_provider` set to `anonymous`. Realtime Database rules can allow authenticated anonymous users while blocking unauthenticated users.
+Why: Firebase anonymous authentication returns an `idToken` with `sign_in_provider` set to `anonymous`. Realtime Database rules can allow authenticated anonymous users while blocking unauthenticated users.
 
 ## Querying The Database With The Anonymous Token
 ---
@@ -176,14 +155,14 @@ Relevant output:
 ## Why This Worked
 ---
 
-The app embedded enough Firebase config to impersonate a normal client. The database rules denied anonymous HTTP callers but allowed callers with a Firebase anonymous auth identity.
+The app embedded enough Firebase configuration to impersonate a normal client. The database rules denied anonymous HTTP callers but allowed callers with a Firebase anonymous authentication identity.
 
 ## Other Methods That Could Have Worked
 ---
 
-- Run the APK in an emulator, intercept traffic with Burp/mitmproxy, and observe the app making the same Firebase anonymous auth and database requests.
+- Run the APK in an emulator, intercept traffic with Burp or mitmproxy, and observe the app making the same Firebase anonymous authentication and database requests.
 - Fully decompile with jadx/apktool and read the Firebase client code paths directly.
-- Use Android dynamic instrumentation such as Frida to hook Firebase auth/database calls.
+- Use Android dynamic instrumentation such as Frida to hook Firebase authentication and database calls.
 
 ## High-Level Solve Path
 ---
