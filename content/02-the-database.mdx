@@ -30,26 +30,11 @@ The hint points at anonymous identity rather than no identity. In Firebase terms
 ## Recon
 ---
 
-I first confirmed the APK was present:
-
-```powershell Terminal
-Get-ChildItem -Force
-```
-
-Why: before reverse engineering, confirm the file name and size so later commands target the right artifact.
-
-I checked available tools:
-
-```powershell Terminal
-Get-Command jadx,apktool,aapt,java,python,python3,7z,jar -ErrorAction SilentlyContinue | Select-Object Name,Source
-```
-
-Why: jadx/apktool were not initially on PATH, so I started with ZIP/DEX/string inspection instead of full Java decompilation.
 
 I listed APK contents:
 
 ```powershell Terminal
-jar tf "fam-ctf (1).apk"
+jar tf "fam-ctf.apk"
 ```
 
 Important findings:
